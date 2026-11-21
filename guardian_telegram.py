@@ -24,6 +24,7 @@ except ImportError:  # pragma: no cover
 from guardian_core import GuardianError, LiquityReader, TrovePosition, classify_ratio, env_int, redact
 from guardian_mcp_logic import extract_rows, simulate_borrowing_cost
 from guardian_store import GuardianStore, utc_now
+from rate_intelligence import summarise_rate_sample, annual_interest_bold, annual_savings_vs_rate
 
 LOG = logging.getLogger("bold_guardian.telegram")
 TOKEN = os.getenv("GUARDIAN_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
@@ -57,6 +58,10 @@ DEGRADED_AFTER_FAILURES = env_int("GUARDIAN_DEGRADED_AFTER_FAILURES", 3, 1)
 
 RISKY_LABELS = {"RISKY", "LIQUIDATABLE"}
 BOT_USERNAME: str | None = None
+RATE_SAMPLE_TTL = env_int("GUARDIAN_RATE_SAMPLE_TTL_SECONDS", 900, 60)
+RATE_SAMPLE_SIZE = min(250, env_int("GUARDIAN_RATE_SAMPLE_SIZE", 100, 10))
+_RATE_SAMPLE_CACHE: dict[str, tuple[float, dict]] = {}
+_RATE_SAMPLE_LOCK = threading.Lock()
 
 START_TEXT = (
     "🛡 <b>BOLD GUARDIAN</b>\n\n"
@@ -427,6 +432,18 @@ def handle_status(reader, chat_id, wallet: str | None = None):
         send(chat_id, "⚠️ Couldn't refresh your watched Trove status. Previous saved history has been preserved.")
 
 
+def _cached_branch_rate_sample(reader, branch: str) -> dict:
+    now = time.monotonic()
+    with _RATE_SAMPLE_LOCK:
+        cached = _RATE_SAMPLE_CACHE.get(branch)
+        if cached and now - cached[0] < RATE_SAMPLE_TTL:
+            return cached[1]
+    sample = reader.sample_branch_rates(branch, RATE_SAMPLE_SIZE)
+    with _RATE_SAMPLE_LOCK:
+        _RATE_SAMPLE_CACHE[branch] = (now, sample)
+    return sample
+
+
 def handle_rate(reader, chat_id, wallet: str | None = None):
     try:
         groups = watched_positions(reader, chat_id, wallet)
@@ -434,18 +451,57 @@ def handle_rate(reader, chat_id, wallet: str | None = None):
             if not positions:
                 send(chat_id, f"No Troves found for <code>{html.escape(address)}</code>.")
                 continue
-            lines = [f"📈 <b>RATE INTELLIGENCE</b>\nWallet: <code>{html.escape(address)}</code>"]
+            lines = [
+                "📈 <b>YOUR RATE INTELLIGENCE</b>",
+                f"Wallet: <code>{html.escape(address)}</code>",
+                "Compares each Trove with an evenly spaced sample of Troves in the same collateral branch.",
+            ]
             for p in positions:
-                annual_cost = p.debt_bold * p.annual_interest_rate_pct / Decimal(100)
+                annual_cost = annual_interest_bold(p.debt_bold, p.annual_interest_rate_pct)
                 lines.extend([
                     f"\n<b>{html.escape(p.branch)} Trove #{str(p.trove_id)[-8:]}</b>",
                     f"Debt: {p.debt_bold:,.2f} BOLD",
-                    f"Current annual rate: {p.annual_interest_rate_pct:.3f}%",
+                    f"Your current rate: {p.annual_interest_rate_pct:.3f}%",
                     f"Estimated annual interest: {annual_cost:,.2f} BOLD",
                 ])
+                try:
+                    sample = _cached_branch_rate_sample(reader, p.branch)
+                    summary = summarise_rate_sample(sample.get("rates_pct", []), p.annual_interest_rate_pct)
+                    n = summary["sample_count"]
+                    if n < 10:
+                        lines.append("⚠️ Not enough active Troves were available in the branch sample for a meaningful comparison.")
+                    else:
+                        median_rate = summary["median_rate_pct"]
+                        lower_share = summary["share_lower_pct"]
+                        delta = annual_savings_vs_rate(p.debt_bold, p.annual_interest_rate_pct, median_rate)
+                        lines.extend([
+                            f"Sample median rate: {median_rate:.3f}%",
+                            f"Your rate is higher than {lower_share:.1f}% of sampled Troves.",
+                        ])
+                        if delta > 0:
+                            lines.append(f"Estimated annual interest difference vs sample median: {delta:,.2f} BOLD more at your current rate.")
+                        elif delta < 0:
+                            lines.append(f"Estimated annual interest difference vs sample median: {abs(delta):,.2f} BOLD less at your current rate.")
+                        else:
+                            lines.append("Your rate matches the sample median.")
+                        lines.append(
+                            f"Sample: {n} active/zombie Troves from {sample.get('total_trove_ids', 0):,} Trove IDs "
+                            f"(block {sample.get('block_number')}). Cached for {RATE_SAMPLE_TTL // 60} minutes."
+                        )
+                except Exception as sample_exc:
+                    LOG.warning("Branch rate sample failed for %s: %s", p.branch, redact(sample_exc, TOKEN, os.getenv("ETH_RPC_URL")))
+                    lines.append("⚠️ Branch comparison is temporarily unavailable; only your borrowing-cost estimate is shown.")
                 if p.batch_manager:
-                    lines.append("⚠️ This Trove belongs to an interest batch. The estimate uses the reported Trove rate and excludes any separate batch management fee.")
-            lines.append("\nThis is a borrowing-cost estimate, not a rate recommendation. Branch-wide rate ranking and redemption-context analysis are not yet enabled in this release.")
+                    lines.append("⚠️ This Trove belongs to an interest batch. Its rate is controlled by the batch manager and a separate management fee may apply.")
+                lines.append(
+                    "Redemption context: lower-rate Troves are generally earlier in Liquity's redemption ordering. "
+                    "This comparison does not predict whether or when your Trove will be redeemed."
+                )
+            lines.append(
+                "\nMethod: sample-based comparison, not a complete branch census. "
+                "Interest estimates use simple interest and constant debt; batch fees, compounding and transaction costs are excluded. "
+                "This is information, not a rate recommendation."
+            )
             send(chat_id, "\n".join(lines))
     except ValueError as exc:
         send(chat_id, f"📈 {html.escape(str(exc))}")

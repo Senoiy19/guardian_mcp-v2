@@ -493,6 +493,45 @@ class LiquityReader:
             price_source=price_source,
         )
 
+    def sample_branch_rates(self, branch: str, sample_size: int = 100) -> dict[str, Any]:
+        """Read a deterministic, evenly-spaced sample of active/zombie Trove rates.
+
+        This is explicitly a sample, not a complete branch census. Reads are pinned to
+        one block so the returned sample is internally consistent.
+        """
+        if branch not in BRANCHES:
+            raise GuardianError(f"Unsupported branch: {branch}. Choose one of {', '.join(BRANCHES)}.")
+        if isinstance(sample_size, bool) or not isinstance(sample_size, int) or not 10 <= sample_size <= 250:
+            raise GuardianError("sample_size must be an integer between 10 and 250.")
+        block = self.latest_block()
+        tm, _, _, _ = self._contracts(branch)
+        count = int(self._call(tm.functions.getTroveIdsCount(), block))
+        if count <= 0:
+            return {"branch": branch, "block_number": block, "total_trove_ids": count,
+                    "sampled_ids": 0, "active_sample_count": 0, "rates_pct": []}
+        n = min(count, sample_size)
+        if n == count:
+            indices = list(range(count))
+        elif n == 1:
+            indices = [count - 1]
+        else:
+            indices = sorted({round(i * (count - 1) / (n - 1)) for i in range(n)})
+        rates: list[Decimal] = []
+        for index in indices:
+            try:
+                trove_id = int(self._call(tm.functions.getTroveFromTroveIdsArray(index), block))
+                raw = self._call(tm.functions.Troves(trove_id), block)
+                status = int(raw[3])
+                # Liquity V2 status: 1 = active, 4 = zombie. Closed/nonexistent are excluded.
+                if status not in (1, 4):
+                    continue
+                rates.append(_pct_wad(int(raw[7])))
+            except Exception as exc:
+                LOG.warning("%s rate sample item %s skipped: %s", branch, index, redact(exc, self.rpc_url))
+        return {"branch": branch, "block_number": block, "total_trove_ids": count,
+                "sampled_ids": len(indices), "active_sample_count": len(rates),
+                "rates_pct": rates}
+
     def inspect_trove(self, branch: str, trove_id: int) -> TrovePosition:
         """Read one Trove by branch and NFT id, resolving its current owner on-chain."""
         if branch not in BRANCHES:
