@@ -37,3 +37,12 @@ Every item below was reproduced against V1 before being fixed, and has a regress
 ## Known limits (unchanged)
 Redemption exposure, branch shutdown thresholds, Stability Pool positions and ENS names are not modelled.
 Nothing here was tested against a live RPC, the live Liquity yield feed, Telegram, or Railway.
+
+
+## Rate Intelligence update
+- `/rate` now compares each watched Trove's rate with an evenly spaced sample of up to 100 active/zombie Troves in the same collateral branch.
+- Reports sample median, share of sampled Troves with lower rates, and estimated annual interest difference versus the sample median.
+- Reports sample size, total Trove ID count and pinned Ethereum block; branch samples are cached for 15 minutes by default.
+- Adds redemption-order context without predicting redemption probability or timing.
+- Labels the comparison as sample-based (not a complete branch census) and retains simple-interest / constant-debt caveats.
+- New configuration: `GUARDIAN_RATE_SAMPLE_SIZE` (10–250, default 100) and `GUARDIAN_RATE_SAMPLE_TTL_SECONDS` (minimum 60, default 900).

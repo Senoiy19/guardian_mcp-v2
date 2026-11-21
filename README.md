@@ -11,7 +11,7 @@ This package is the public multi-user Guardian build.
 - Added short-lived BOLD yield caching so `/yield` and `/opportunities` share one fetch.
 - Added SQLite persistence for watched wallets, position snapshots and deduplicated alerts.
 - Added `/watch`, `/stop`, `/watching`, `/history`, and watched-Trove `/status`.
-- Added `/rate` to calculate estimated annual borrowing interest for watched Troves.
+- Added `/rate` rate intelligence: borrowing-cost estimates, sample-based same-branch rate comparison, and redemption-order context.
 - Added `/simulate` to compare simple-interest costs at two rates over a selected period.
 - Added opt-in `/yieldwatch` and `/yieldstop` subscriptions for significant APR drops and newly detected venues.
 - Added persistent yield observations and per-user alert deduplication.
@@ -80,7 +80,7 @@ Guardian is read-only. It does not ask for private keys and does not execute tra
 
 Risk labels such as `HEALTHY`, `SICKLY`, `RISKY`, and `LIQUIDATABLE` are Guardian presentation heuristics, not official Liquity classifications.
 
-`/rate` currently reports estimated borrowing cost only. `/simulate` uses simple interest and a constant debt balance. Neither command recommends a rate. Branch-wide rate ranking, validated redemption-context modelling, external loan comparisons, automatic rate changes and yield risk-adjusted ranking are not included in this release. Yield alerts require users to opt in with `/yieldwatch`; the first successful check establishes a baseline and does not generate historical-change alerts.
+`/rate` compares each watched Trove with an evenly spaced sample (up to 100) of active/zombie Troves in the same collateral branch. It reports the sample median, the share of sampled Troves with lower rates, and the estimated annual interest difference versus the sample median. This is not a complete branch census or a rate recommendation. Redemption context explains ordering only; it does not predict redemption probability or timing. Sample results are cached for 15 minutes by default. `/simulate` uses simple interest and a constant debt balance; neither command includes batch management fees, compounding or transaction costs. Yield alerts require users to opt in with `/yieldwatch`; the first successful check establishes a baseline and does not generate historical-change alerts.
 
 ## MCP server (new in this package)
 
